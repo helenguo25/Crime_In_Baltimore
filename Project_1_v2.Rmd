@@ -1,0 +1,440 @@
+---
+title: "Project_1"
+author: "Helen Guo"
+date: "2024-03-17"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+# Clear workspace
+rm(list=ls())
+
+library(dplyr)
+library(ggplot2)
+library(coda)
+library(tidyverse)
+library(MASS)
+```
+
+# Data Cleaning
+```{r}
+data <- read.csv('~/Documents/Methods/Term_3/data/DataAnalysis_Baltimore_Crime_Data.csv')
+
+# Convert 'date' to Date type
+data$CrimeDate <- as.Date(data$CrimeDate, format = "%m/%d/%Y")
+# Extract hours from CrimeTime as numeric
+data$Hour <- as.numeric(format(strptime(data$CrimeTime, format = "%H:%M:%S"), "%H"))
+```
+
+# Exploratory data analysis - average crime by hour
+```{r,fig.height=8, fig.width=9}
+count_data <- data %>%
+  mutate(Day = CrimeDate,
+         Time = Hour) %>%
+  group_by(Day, Time) %>%
+  summarise(Count = n(), .groups = 'drop') %>%
+  ungroup() %>%
+  complete(Day, Time, fill = list(Count = 0))
+  
+overall_hist <- ggplot(count_data, aes(x = Count)) +
+  geom_histogram(binwidth = 1, fill = "skyblue", color = "black") +
+  labs(title = "Frequency of overall crime counts per hour",
+       x = "Overall crime counts per hour",
+       y = "Frequency") 
+
+#ggsave("overall_hist.png", plot = overall_hist, device= "png")
+  
+# Define time ranges
+time_ranges <- c("12AM-1AM", "1AM-2AM", "2AM-3AM", "3AM-4AM", "4AM-5AM", "5AM-6AM",
+                 "6AM-7AM", "7AM-8AM", "8AM-9AM", "9AM-10AM", "10AM-11AM", "11AM-12PM",
+                 "12PM-1PM", "1PM-2PM", "2PM-3PM", "3PM-4PM", "4PM-5PM", "5PM-6PM",
+                 "6PM-7PM", "7PM-8PM", "8PM-9PM", "9PM-10PM", "10PM-11PM", "11PM-12AM")
+
+# Replace values in 'Time' column
+count_data$Time <- time_ranges[count_data$Time + 1]
+
+# Convert Time to factor before setting reference levels
+count_data$Time <- factor(count_data$Time, levels = c("5AM-6AM",
+                 "6AM-7AM", "7AM-8AM", "8AM-9AM", "9AM-10AM", "10AM-11AM", "11AM-12PM",
+                 "12PM-1PM", "1PM-2PM", "2PM-3PM", "3PM-4PM", "4PM-5PM", "5PM-6PM",
+                 "6PM-7PM", "7PM-8PM", "8PM-9PM", "9PM-10PM", "10PM-11PM", "11PM-12AM","12AM-1AM", "1AM-2AM", "2AM-3AM", "3AM-4AM", "4AM-5AM"))
+
+# Prepare data: Calculate average count for each time interval
+avg_count <- count_data %>%
+  group_by(Time) %>%
+  summarise(Avg_Count = mean(Count))
+
+# Plot average count over time using ggplot as a line plot
+overall_trend <- ggplot(avg_count, aes(x = Time, y = Avg_Count, group = 1)) +
+  geom_line(color = "black") +
+  labs(title = "Mean overall crime count over time",
+       x = "Time of day",
+       y = "Mean overall crime count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+#ggsave("overall_trend.png", plot = overall_trend, device= "png")
+```
+
+# Poisson model by hour
+```{r,fig.height=8, fig.width=9}
+# Set reference level to "5AM-6AM"
+count_data$Time <- relevel(count_data$Time, ref = "5AM-6AM")
+
+# Fit Poisson GLM
+poisson_model <- glm(Count ~ 0 + factor(Time), data = count_data, family = poisson(link=log))
+summary(poisson_model)
+
+# Calculate dispersion factor
+SSR <- sum(residuals(poisson_model, type = "pearson")^2)
+df <- poisson_model$df.residual
+dispersion_factor <- SSR / df
+
+# Print dispersion factor
+cat("Dispersion factor from poisson model:", dispersion_factor, "\n")
+
+# Get null deviance
+null_deviance <- poisson_model$null.deviance
+
+# Get residual deviance
+residual_deviance <- deviance(poisson_model)
+
+# Get null DOF
+null_dof <- poisson_model$df.null
+
+# Get residual DOF
+residual_dof <- poisson_model$df.residual
+
+# Calculate F statistic
+F_stat <- ((null_deviance - residual_deviance)/(null_dof - residual_dof))/((SSR/residual_dof))
+
+# Drop-in-deviance p-val
+p_val <- 1-pf(F_stat, null_dof - residual_dof, residual_dof)
+
+# Print dispersion factor
+cat("Drop-in-deviance test p-value:", p_val, "\n")
+
+# Extract standard errors
+standard_errors <- sqrt(diag(vcov(poisson_model)))  
+
+# Calculate estimates (exponential of coefficients)
+estimates <- exp(coef(poisson_model))  
+
+alpha <- 0.05  # Significance level (for two-tailed test)
+
+# Critical value for a two-tailed test
+critical_value <- qt(1 - alpha/2, df)
+
+# Calculate 95% confidence intervals (exponential of (coefficients +/- 1.96 * standard errors * sqrt(dispersion factor)))
+lower_bound <- exp(coef(poisson_model) - critical_value * standard_errors *sqrt(dispersion_factor))
+upper_bound <- exp(coef(poisson_model) + critical_value * standard_errors *sqrt(dispersion_factor))
+
+ci <- cbind(lower_bound, upper_bound)
+
+time_label <- c(c("5AM-6AM","6AM-7AM", "7AM-8AM", "8AM-9AM", "9AM-10AM", "10AM-11AM", "11AM-12PM",
+                 "12PM-1PM", "1PM-2PM", "2PM-3PM", "3PM-4PM", "4PM-5PM", "5PM-6PM",
+                 "6PM-7PM", "7PM-8PM", "8PM-9PM", "9PM-10PM", "10PM-11PM", "11PM-12AM","12AM-1AM", "1AM-2AM", "2AM-3AM", "3AM-4AM", "4AM-5AM"))
+
+# Create a data frame for the forest plot
+forest_data <- data.frame(
+  coef = estimates,
+  lower = ci[, 1],
+  upper = ci[, 2],
+  label = paste(time_label)
+)
+
+# Create a forest plot
+forest_plot <- ggplot(forest_data, aes(x = coef, xmin = lower, xmax = upper, y = factor(label,levels=time_label))) +
+  geom_point(size = 3) +
+  geom_errorbarh(height = 0.2) +
+  geom_text(aes(label = paste(round(coef, 2), " (", round(lower, 2), ", ", round(upper, 2), ")")), size = 2.5, vjust = -1) +
+  theme_minimal() +
+  labs(title = "Overall crimes",
+       subtitle = "Estimated mean number of crimes during hour (95% CI)",
+       x = "Estimated mean number of crimes",
+       y = "Time of day")
+
+# Print the updated forest plot
+print(forest_plot)
+#ggsave("overall_crime.png", plot = forest_plot, device= "png")
+```
+# Residual diagnostics 
+```{r,fig.height=8, fig.width=9}
+# Extract residuals from the model
+residuals <- count_data$Count - fitted(poisson_model)
+
+# Create a data frame with Day and residuals from first 200 days
+ residuals_data <- data.frame(Day = count_data$Time, Residuals = residuals)%>%
+ mutate(obs_number = row_number())
+
+# Plot residuals over time
+residuals_over_time_plot <- ggplot(residuals_data, aes(x = obs_number, y = Residuals)) +
+ geom_point() +
+  geom_line() + 
+ geom_hline(yintercept = 0, linetype = "dashed", color = "red") +  
+ labs(title = "Residuals over time",
+      x = "Observation number",
+      y = "Residuals") +
+ theme_minimal()
+
+#ggsave("residuals_over_time_plot.png", plot = residuals_over_time_plot, device= "png")
+
+# Print the residuals over time plot
+ print(residuals_over_time_plot)
+ 
+# Check out dates of large residuals
+filtered_count_data <- count_data[count_data$Count > 30, ]
+
+# 2013-12-25; 60 crimes from 2AM-3AM
+# 2015 protests after death of Freddie Gray: 2015-04-27; String of 30-50 crimes per hour from 3PM-10PM
+# 2016 Freddie Gray Protests following acquittal of officers: 2016-06-05; 136 crimes from 2AM-3AM
+```
+
+# Autocorrelation diagnostics 
+```{r,fig.height=8, fig.width=9}
+# Extract residuals from the linear regression model
+residuals <- count_data$Count - fitted(poisson_model)
+ 
+# Check for correlated errors using ACF and PACF - correlated errors up to lag of time 8
+# Generate the ACF plot using acf() function
+acf_data <- acf(residuals)
+
+# Save the ACF plot to a PNG file
+#png("acf_plot.png")
+
+# Plot the ACF data
+plot(acf_data)
+
+# Close the graphics device and save the plot
+#dev.off()
+
+# Generate the PACF plot using acf() function
+pacf_data <- pacf(residuals)
+
+# Save the ACF plot to a PNG file
+#png("pacf_plot.png")
+
+# Plot the ACF data
+plot(pacf_data)
+
+# Close the graphics device and save the plot
+#dev.off()
+``` 
+
+# Exploratory data analysis - average crime by hour and crime type
+```{r,fig.height=8, fig.width=9}
+# List of unique crime types
+crime_types <- unique(data$Description)
+
+# Calculate frequencies and percentages
+summary_data <- data %>%
+  group_by(Description) %>%
+  summarise(freq = n()) %>%
+  mutate(percentage = freq / sum(freq) * 100)
+
+# Create the histogram with percentages
+crime_freq <- ggplot(summary_data, aes(x = Description, y = freq)) +
+  geom_bar(fill = "skyblue", color = "black", stat = "identity") +
+  geom_text(aes(label = paste0(round(percentage), "%")), 
+            position = position_stack(vjust = 0.5), 
+            color = "black", size = 3) +
+  labs(title = "Total crime counts over the study period by crime type",
+       x = "Crime type",
+       y = "Total crime counts") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+#ggsave("crime_freq.png", plot = crime_freq, device= "png")
+
+# Create a new data frame with counts per day, per hour
+count_data <- data %>%
+  mutate(Day = CrimeDate,
+         Time = Hour) %>%
+  group_by(Day, Time, Description) %>%
+  summarise(Count = n(), .groups = 'drop') %>%
+  ungroup() %>%
+  complete(Day, Time, Description, fill = list(Count = 0))
+
+# Create histogram faceted by description with x-axis range from 0 to 10
+crime_type_hist <- ggplot(count_data, aes(x = Count)) +
+  geom_histogram(binwidth = 1, fill = "skyblue", color = "black") +
+  facet_wrap(~ Description, scales = "free_y") +
+  labs(title = "Frequency of crime counts per hour faceted by crime type",
+       x = "Crime counts per hour",
+       y = "Frequency") +
+  xlim(-1, 10)
+
+#ggsave("crime_type_hist.png", plot = crime_type_hist, device= "png")
+
+# Define time ranges
+time_ranges <- c("12AM-1AM", "1AM-2AM", "2AM-3AM", "3AM-4AM", "4AM-5AM", "5AM-6AM",
+                 "6AM-7AM", "7AM-8AM", "8AM-9AM", "9AM-10AM", "10AM-11AM", "11AM-12PM",
+                 "12PM-1PM", "1PM-2PM", "2PM-3PM", "3PM-4PM", "4PM-5PM", "5PM-6PM",
+                 "6PM-7PM", "7PM-8PM", "8PM-9PM", "9PM-10PM", "10PM-11PM", "11PM-12AM")
+
+# Replace values in 'Time' column
+count_data$Time <- factor(time_ranges[count_data$Time + 1], levels = time_ranges)
+
+# Convert Time to factor before setting reference levels
+count_data$Time <- factor(count_data$Time, levels = c("5AM-6AM",
+                 "6AM-7AM", "7AM-8AM", "8AM-9AM", "9AM-10AM", "10AM-11AM", "11AM-12PM",
+                 "12PM-1PM", "1PM-2PM", "2PM-3PM", "3PM-4PM", "4PM-5PM", "5PM-6PM",
+                 "6PM-7PM", "7PM-8PM", "8PM-9PM", "9PM-10PM", "10PM-11PM", "11PM-12AM","12AM-1AM", "1AM-2AM", "2AM-3AM", "3AM-4AM", "4AM-5AM"))
+
+# Prepare data: Calculate average count for each time interval
+avg_count <- count_data %>%
+  group_by(Time, Description) %>%
+  summarise(
+    Avg_Count = mean(Count),
+    Integer_Part_Mean = floor(mean(Count)),  # Calculate the integer part of the mean count
+    Mode_Count = as.numeric(names(sort(table(Count), decreasing = TRUE)[1])),
+    .groups = 'drop'
+  ) %>%
+  mutate(Integer_Part_Mean_Greater_Mode = Integer_Part_Mean > Mode_Count)
+
+# Set distinct colors for each crime type
+crime_colors <- c("ROBBERY - RESIDENCE" = "#E41A1C", "AUTO THEFT" = "#66C2A5", "SHOOTING" = "#4DAF4A", 
+                  "AGG. ASSAULT" = "#984EA3", "COMMON ASSAULT" = "#FF7F00", "BURGLARY" = "gray8", 
+                  "HOMICIDE" = "#A65628", "ROBBERY - STREET" = "#F781BF", "ROBBERY - COMMERCIAL" = "#999999", 
+                  "LARCENY" = "#377EB8", "LARCENY FROM AUTO" = "darkgreen", "ARSON" = "#F0A6A6", 
+                  "ROBBERY - CARJACKING" = "#FDAE6B", "ASSAULT BY THREAT" = "#E7298A", "RAPE" = "#7570B3")
+
+
+# Plot average count over time using ggplot as a line plot for each crime type
+crime_type_trend <- ggplot(avg_count, aes(x = Time, y = Avg_Count, group = Description, color = Description)) +
+  geom_line() +
+  labs(title = "Mean crime count over time by crime type",
+       x = "Time of day",
+       y = "Mean crime count",
+       color = "Crime Type") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_color_manual(values = crime_colors)
+
+#ggsave("crime_type_trend.png", plot = crime_type_trend, device= "png")
+```
+
+# Poisson model by hour and crime type
+```{r,fig.height=8, fig.width=9}
+# Unique crime types
+crime_types <- unique(data$Description)
+  
+# Loop through each crime type
+for (crime_type in crime_types) {
+  
+ # Create a new data frame with counts per day, per hour
+  count_data <- data %>%
+    filter(Description == crime_type) %>%
+    mutate(Day = CrimeDate,
+           Time = Hour) %>%
+    group_by(Day, Time) %>%
+    summarise(Count = n(), .groups = 'drop') %>%
+  ungroup() %>%
+  complete(Day, Time, fill = list(Count = 0))
+  
+  # Define time ranges
+time_ranges <- c("12AM-1AM", "1AM-2AM", "2AM-3AM", "3AM-4AM", "4AM-5AM", "5AM-6AM",
+                 "6AM-7AM", "7AM-8AM", "8AM-9AM", "9AM-10AM", "10AM-11AM", "11AM-12PM",
+                 "12PM-1PM", "1PM-2PM", "2PM-3PM", "3PM-4PM", "4PM-5PM", "5PM-6PM",
+                 "6PM-7PM", "7PM-8PM", "8PM-9PM", "9PM-10PM", "10PM-11PM", "11PM-12AM")
+
+# Replace values in 'Time' column
+count_data$Time <- factor(time_ranges[count_data$Time + 1], levels = time_ranges)
+
+# Convert Time to factor before setting reference levels
+count_data$Time <- factor(count_data$Time, levels = c("5AM-6AM",
+                 "6AM-7AM", "7AM-8AM", "8AM-9AM", "9AM-10AM", "10AM-11AM", "11AM-12PM",
+                 "12PM-1PM", "1PM-2PM", "2PM-3PM", "3PM-4PM", "4PM-5PM", "5PM-6PM",
+                 "6PM-7PM", "7PM-8PM", "8PM-9PM", "9PM-10PM", "10PM-11PM", "11PM-12AM","12AM-1AM", "1AM-2AM", "2AM-3AM", "3AM-4AM", "4AM-5AM"))
+
+# Set reference level to "5AM-6AM"
+count_data$Time <- relevel(count_data$Time, ref = "5AM-6AM")
+
+ # Fit Poisson GLM
+poisson_model <- glm(Count ~ 0 + factor(Time), data = count_data, family = poisson(link=log))
+
+  # Print the crime type
+  cat("Crime Type:", crime_type, "\n")
+  
+print(summary(poisson_model))
+# Calculate dispersion factor
+SSR <- sum(residuals(poisson_model, type = "pearson")^2)
+df <- poisson_model$df.residual
+dispersion_factor <- SSR / df
+
+# Print dispersion factor
+cat("Dispersion factor from poisson model:", dispersion_factor, "\n")
+
+# Get null deviance
+null_deviance <- poisson_model$null.deviance
+
+# Get residual deviance
+residual_deviance <- deviance(poisson_model)
+
+# Get null DOF
+null_dof <- poisson_model$df.null
+
+# Get residual DOF
+residual_dof <- poisson_model$df.residual
+
+# Calculate F statistic
+F_stat <- ((null_deviance - residual_deviance)/(null_dof - residual_dof))/((SSR/residual_dof))
+
+# Drop-in-deviance p-val
+p_val <- 1-pf(F_stat, null_dof - residual_dof, residual_dof)
+
+# Print dispersion factor
+cat("Drop-in-deviance test p-value:", p_val, "\n")
+
+# Extract standard errors
+standard_errors <- sqrt(diag(vcov(poisson_model)))
+
+# Calculate estimates (exponential of coefficients)
+estimates <- exp(coef(poisson_model))
+
+alpha <- 0.05  # Significance level (for two-tailed test)
+
+# Critical value for a two-tailed test
+critical_value <- qt(1 - alpha/2, df)
+
+# Calculate 95% confidence intervals (exponential of (coefficients +/- 1.96 * standard errors * sqrt(dispersion factor)))
+lower_bound <- exp(coef(poisson_model) - critical_value * standard_errors *sqrt(dispersion_factor))
+upper_bound <- exp(coef(poisson_model) + critical_value * standard_errors *sqrt(dispersion_factor))
+  
+  # Combine estimates and confidence intervals
+  ci <- cbind(lower_bound, upper_bound)
+  
+  # Time labels
+  time_label <- c("5AM-6AM","6AM-7AM", "7AM-8AM", "8AM-9AM", "9AM-10AM", "10AM-11AM", "11AM-12PM",
+                  "12PM-1PM", "1PM-2PM", "2PM-3PM", "3PM-4PM", "4PM-5PM", "5PM-6PM",
+                  "6PM-7PM", "7PM-8PM", "8PM-9PM", "9PM-10PM", "10PM-11PM", "11PM-12AM",
+                  "12AM-1AM", "1AM-2AM", "2AM-3AM", "3AM-4AM", "4AM-5AM")
+  
+  # Create a data frame for the forest plot
+  forest_data <- data.frame(
+    coef = estimates,
+    lower = ci[, 1],
+    upper = ci[, 2],
+    label = time_label
+  )
+  
+  # Create a forest plot
+  forest_plot <- ggplot(forest_data, aes(x = coef, xmin = lower, xmax = upper, y = factor(label, levels = time_label))) +
+    geom_point(size = 3) +
+    geom_errorbarh(height = 0.2) +
+    geom_text(aes(label = paste(round(coef, 2), " (", round(lower, 2), ", ", round(upper, 2), ")")), 
+              size = 2.5, vjust = -1) +
+    theme_minimal() +
+    labs(title = paste("Crime Type:", crime_type),
+         subtitle = "Estimated mean number of crimes during hour (95% CI)",
+         x = "Estimated mean number of crimes",
+         y = "Time of day")
+  
+  # Print the forest plot for the current crime type
+  print(forest_plot)
+  #ggsave(paste0(crime_type, "_forest_plot.png"), forest_plot)
+}
+```
+
